@@ -1,0 +1,557 @@
+services:
+  redis:
+    image: redis:7.0.12
+    restart: always
+    networks:
+      - opencti
+    command: redis-server --maxmemory 4gb --maxmemory-policy allkeys-lru
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    labels:
+      - "com.opencti.service=redis"
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASSWORD}
+    networks:
+      - opencti
+    restart: always
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    labels:
+      - "com.opencti.service=rabbitmq"
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-24T21-41-23Z
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    command: server /data
+    volumes:
+      - s3_data:/data
+    networks:
+      - opencti
+    restart: always
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    labels:
+      - "com.opencti.service=minio"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    environment:
+      - xpack.security.enabled=false
+      - discovery.type=single-node
+      - node.name=opencti
+      - cluster.name=opencti-cluster
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms6g -Xmx6g"
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - indices.memory.index_buffer_size=30%
+      - thread_pool.write.queue_size=1000
+      - thread_pool.search.queue_size=10000
+      - indices.queries.cache.size=20%
+      - indices.fielddata.cache.size=20%
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks:
+      - opencti
+    restart: always
+    labels:
+      - "com.opencti.service=elasticsearch"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  opencti:
+    image: opencti/platform:6.1.2
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=16384
+      - APP__PORT=8080
+      - APP__BASE_URL=${OPENCTI_BASE_URL}
+      - APP__ADMIN__EMAIL=${OPENCTI_ADMIN_EMAIL}
+      - APP__ADMIN__PASSWORD=${OPENCTI_ADMIN_PASSWORD}
+      - APP__ADMIN__TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - REDIS__HOSTNAME=redis
+      - REDIS__PORT=6379
+      - ELASTICSEARCH__URL=http://elasticsearch:9200
+      - MINIO__ENDPOINT=minio
+      - MINIO__PORT=9000
+      - MINIO__USE_SSL=false
+      - MINIO__ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO__SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - RABBITMQ__HOSTNAME=rabbitmq
+      - RABBITMQ__PORT=5672
+      - RABBITMQ__USERNAME=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ__PASSWORD=${RABBITMQ_DEFAULT_PASSWORD}
+      - APP__GRAPHQL__PLAYGROUND__FORCE_DISABLED_INTROSPECTION=false
+      - APP__PERFORMANCE__REQUEST_TIMEOUT=1200000
+      - APP__PERFORMANCE__MAX_PAYLOAD_SIZE=5000mb
+      - APP__PERFORMANCE__BATCH_SIZE=1000
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+    networks:
+      - opencti
+    restart: always
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    labels:
+      - "com.opencti.service=platform"
+
+  worker:
+    image: opencti/worker:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - WORKER_LOG_LEVEL=info
+      - NODE_OPTIONS=--max-old-space-size=8192
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      opencti:
+        condition: service_started
+    deploy:
+      mode: replicated
+      replicas: 2
+      resources:
+        limits:
+          memory: 8G
+    networks:
+      - opencti
+    restart: always
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    labels:
+      - "com.opencti.service=worker"
+
+  connector-export-file-stix:
+    image: opencti/connector-export-file-stix:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileStix
+      - CONNECTOR_SCOPE=application/json
+      - CONNECTOR_CONFIDENCE_LEVEL=15
+      - CONNECTOR_LOG_LEVEL=info
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=export-file-stix"
+
+  connector-export-file-csv:
+    image: opencti/connector-export-file-csv:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_CSV_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileCSV
+      - CONNECTOR_SCOPE=text/csv
+      - CONNECTOR_LOG_LEVEL=info
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=export-file-csv"
+
+  connector-export-file-txt:
+    image: opencti/connector-export-file-txt:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_TXT_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileTxt
+      - CONNECTOR_SCOPE=text/plain
+      - CONNECTOR_LOG_LEVEL=info
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=export-file-txt"
+
+  connector-import-document:
+    image: opencti/connector-import-document:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_DOCUMENT_ID}
+      - CONNECTOR_TYPE=INTERNAL_IMPORT_FILE
+      - CONNECTOR_NAME=ImportDocument
+      - CONNECTOR_SCOPE=application/pdf,text/plain,text/html
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_ONLY_CONTEXTUAL=false
+      - CONNECTOR_CONFIDENCE_LEVEL=15
+      - CONNECTOR_LOG_LEVEL=info
+      - IMPORT_DOCUMENT_CREATE_INDICATOR=true
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=import-document"
+
+  connector-mitre:
+    image: opencti/connector-mitre:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MITRE_ID}
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=MITRE ATT&CK
+      - CONNECTOR_SCOPE=identity,attack-pattern,course-of-action,intrusion-set,malware,tool,report,relationship,position
+      - CONNECTOR_CONFIDENCE_LEVEL=75
+      - CONNECTOR_UPDATE_EXISTING_DATA=true
+      - CONNECTOR_LOG_LEVEL=info
+      - MITRE_INTERVAL=7
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=mitre"
+
+  connector-alienvault:
+    image: opencti/connector-alienvault:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_ALIENVAULT_ID}
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=AlienVault
+      - CONNECTOR_SCOPE=alienvault
+      - CONNECTOR_CONFIDENCE_LEVEL=75
+      - CONNECTOR_LOG_LEVEL=info
+      - ALIENVAULT_API_KEY=${ALIENVAULT_API_KEY}
+      - ALIENVAULT_TLP=White
+      - ALIENVAULT_CREATE_OBSERVABLES=true
+      - ALIENVAULT_CREATE_INDICATORS=true
+      - ALIENVAULT_PULSE_START_TIMESTAMP=2023-01-01T00:00:00
+      - ALIENVAULT_REPORT_TYPE=threat-report
+      - ALIENVAULT_REPORT_STATUS=New
+      - ALIENVAULT_ENABLE_RELATIONSHIPS=true
+      - ALIENVAULT_ENABLE_ATTACK_PATTERNS_INDICATES=true
+      - CONNECTOR_UPDATE_EXISTING_DATA=false
+      - ALIENVAULT_BASE_URL=https://otx.alienvault.com
+      - ALIENVAULT_INTERVAL_SEC=1800
+      - ALIENVAULT_GUESS_MALWARE=false
+      - ALIENVAULT_GUESS_CVE=false
+      - ALIENVAULT_EXCLUDED_PULSE_INDICATOR_TYPES=FileHash-MD5,FileHash-SHA1
+      - ALIENVAULT_ENABLE_ATTACK_PATTERNS_INDICATES=false
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=alienvault"
+
+  connector-virustotal:
+    image: opencti/connector-virustotal:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_VIRUSTOTAL_ID}
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=VirusTotal
+      - CONNECTOR_SCOPE=virustotal
+      - CONNECTOR_CONFIDENCE_LEVEL=75
+      - CONNECTOR_LOG_LEVEL=info
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
+      - VIRUSTOTAL_MAX_TLP=TLP:AMBER
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=virustotal"
+
+  connector-abuse-ssl:
+    image: opencti/connector-abuse-ssl:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_ABUSE_SSL_ID}
+      - CONNECTOR_NAME=Abuse.ch SSL Blacklist
+      - CONNECTOR_SCOPE=abusessl
+      - CONNECTOR_LOG_LEVEL=info
+      - ABUSESSL_URL=https://sslbl.abuse.ch/blacklist/sslipblacklist.csv
+      - ABUSESSL_INTERVAL=360
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=abuse-ssl"
+
+  connector-cisa:
+    image: opencti/connector-cisa-known-exploited-vulnerabilities:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_CISA_ID}
+      - CONNECTOR_NAME=CISA Known Exploited Vulnerabilities
+      - CONNECTOR_SCOPE=cisa
+      - CONNECTOR_LOG_LEVEL=info
+      - CISA_CATALOG_URL=https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+      - CISA_CREATE_INFRASTRUCTURES=false
+      - CISA_TLP=TLP:CLEAR
+      - CISA_INTERVAL=2
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=cisa"
+
+  connector-misp-feed:
+    image: opencti/connector-misp-feed:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MISP_FEED_ID}
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=MISP Feed
+      - CONNECTOR_SCOPE=misp-feed
+      - CONNECTOR_CONFIDENCE_LEVEL=20
+      - CONNECTOR_LOG_LEVEL=info
+      - MISP_FEED_URL=https://www.circl.lu/doc/misp/feed-osint
+      - MISP_FEED_IMPORT_FROM_DATE=2024-01-01
+      - MISP_FEED_CREATE_INDICATORS=true
+      - MISP_FEED_CREATE_OBSERVABLES=true
+      - MISP_FEED_INTERVAL=5
+      - MISP_FEED_CREATE_REPORTS=true
+      - MISP_FEED_REPORT_TYPE=misp-event
+      - MISP_FEED_CREATE_OBJECT_OBSERVABLES=true
+      - MISP_FEED_IMPORT_WITH_ATTACHMENTS=true
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=misp-feed"
+
+  connector-phishunt:
+    image: opencti/connector-phishunt:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_PHISHUNT_ID}
+      - CONNECTOR_NAME=Phishunt
+      - CONNECTOR_SCOPE=phishunt
+      - CONNECTOR_CONFIDENCE_LEVEL=40
+      - CONNECTOR_LOG_LEVEL=info
+      - PHISHUNT_CREATE_INDICATORS=true
+      - PHISHUNT_INTERVAL=3
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=phishunt"
+
+  connector-ipinfo:
+    image: opencti/connector-ipinfo:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IPINFO_ID}
+      - CONNECTOR_NAME=IpInfo
+      - CONNECTOR_SCOPE=IPv4-Addr
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_CONFIDENCE_LEVEL=75
+      - CONNECTOR_LOG_LEVEL=info
+      - IPINFO_TOKEN=${IPINFO_TOKEN}
+      - IPINFO_MAX_TLP=TLP:AMBER
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=ipinfo"
+
+  connector-google-dns:
+    image: opencti/connector-google-dns:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_GOOGLE_DNS_ID}
+      - CONNECTOR_NAME=Google DNS
+      - CONNECTOR_SCOPE=Domain-Name,Hostname
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_CONFIDENCE_LEVEL=100
+      - CONNECTOR_LOG_LEVEL=info
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=google-dns"
+
+  connector-cve:
+    image: opencti/connector-cve:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_CVE_ID}
+      - CONNECTOR_NAME=Common Vulnerabilities and Exposures
+      - CONNECTOR_SCOPE=identity,vulnerability
+      - CONNECTOR_LOG_LEVEL=info
+      - CVE_BASE_URL=https://services.nvd.nist.gov/rest/json/cves
+      - CVE_API_KEY=${CVE_API_KEY}
+      - CVE_INTERVAL=2
+      - CVE_MAX_DATE_RANGE=120
+      - CVE_MAINTAIN_DATA=true
+      - CVE_PULL_HISTORY=false
+      - CVE_HISTORY_START_YEAR=2019
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=cve"
+
+  connector-malpedia:
+    image: opencti/connector-malpedia:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MALPEDIA_ID}
+      - CONNECTOR_NAME=Malpedia
+      - CONNECTOR_SCOPE=malpedia
+      - CONNECTOR_LOG_LEVEL=info
+      - MALPEDIA_INTERVAL_SEC=86400
+      - MALPEDIA_IMPORT_INTRUSION_SETS=true
+      - MALPEDIA_CREATE_INDICATORS=true
+      - MALPEDIA_CREATE_OBSERVABLES=true
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=malpedia"
+
+  connector-crowdsec:
+    image: opencti/connector-crowdsec:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_CROWDSEC_ID}
+      - CONNECTOR_NAME=CrowdSec
+      - CONNECTOR_SCOPE=crowdsec
+      - CONNECTOR_LOG_LEVEL=info
+      - CROWDSEC_CREATE_INDICATORS=true
+      - CROWDSEC_INTERVAL=60
+      - CROWDSEC_REPORT_TYPE=threat-report
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=crowdsec"
+
+  connector-threatfox:
+    image: opencti/connector-threatfox:6.1.2
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_THREATFOX_ID}
+      - CONNECTOR_NAME=ThreatFox
+      - CONNECTOR_SCOPE=threatfox
+      - CONNECTOR_LOG_LEVEL=info
+      - THREATFOX_INTERVAL=300
+      - THREATFOX_CREATE_INDICATORS=true
+      - THREATFOX_CREATE_OBSERVABLES=true
+      - THREATFOX_REPORT_TYPE=threat-report
+      - THREATFOX_REPORT_STATUS=New
+      - NODE_OPTIONS=--max-old-space-size=4096
+    restart: always
+    depends_on:
+      - opencti
+    networks:
+      - opencti
+    labels:
+      - "com.opencti.connector=threatfox"
+
+volumes:
+  s3_data:
+    driver: local
+  esdata:
+    driver: local
+
+networks:
+  opencti:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1500
+
+
+
+
